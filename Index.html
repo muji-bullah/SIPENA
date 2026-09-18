@@ -51,6 +51,14 @@
       border-color: #cbd5e1;
     }
 
+    @keyframes spinSync {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .rotating i {
+      animation: spinSync 0.8s linear infinite;
+    }
+
     /* ==========================================================================
        DESIGN SYSTEM (Matching Design.png aesthetic)
        ========================================================================== */
@@ -1772,6 +1780,11 @@
             title="Atur Koneksi Database Google Sheets (Vercel / Netlify)">
             <span id="dbStatusDot" style="width: 7px; height: 7px; border-radius: 50%; background: #94a3b8;"></span>
             <span id="dbStatusText">Mode Lokal (Atur GSheets)</span>
+          </button>
+          <button id="topbarSyncBtn" class="header-nav-btn" onclick="syncDatabaseNow(true)"
+            title="Tarik & Sinkronkan data terbaru dari Google Sheets sekarang">
+            <i class="fa-solid fa-arrows-rotate"></i>
+            <span>Sinkronkan</span>
           </button>
           <button class="header-nav-btn" onclick="navigateToPengaturanTab('info')"
             title="Buka Pengaturan Profil, Kepala Sekolah & Keamanan">
@@ -3540,7 +3553,15 @@
     const API_LAST_SYNC_KEY = 'sipena_last_sync';
 
     function getApiUrl() {
-      return localStorage.getItem(API_URL_STORAGE_KEY) || '';
+      const stored = (localStorage.getItem(API_URL_STORAGE_KEY) || '').trim();
+      if (stored) return stored;
+      // Otomatis deteksi jika aplikasi dibuka langsung dari Web App Apps Script
+      if (window.location && window.location.href && window.location.href.includes('script.google.com/macros/s/')) {
+        const autoUrl = window.location.href.split('?')[0];
+        localStorage.setItem(API_URL_STORAGE_KEY, autoUrl);
+        return autoUrl;
+      }
+      return '';
     }
 
     function updateDbStatusUI() {
@@ -3561,7 +3582,7 @@
         }
         if (modeDisplay) modeDisplay.innerHTML = '<strong style="color:#059669;"><i class="fa-solid fa-cloud"></i> Google Sheets (Online)</strong>';
       } else {
-        if (dot) dot.style.background = '#94a3b8';
+        if (dot) dot.style.background = '#f59e0b';
         if (text) text.innerText = 'Mode Lokal (Atur GSheets)';
         if (btn) {
           btn.className = 'badge-status-pill offline';
@@ -3585,12 +3606,33 @@
 
     /**
      * Dispatch API Request ke Google Apps Script Web App
-     * Menggunakan text/plain agar tidak memicu preflight CORS OPTIONS yang diblokir Apps Script
+     * Menggunakan GET untuk pembacaan cepat tanpa CORS issue, dan POST text/plain untuk penulisan
      */
     async function callGSheetApi(action, payload = {}) {
       const url = getApiUrl();
       if (!url) {
         return { success: false, message: 'URL API Google Sheets belum dikonfigurasi.' };
+      }
+
+      // Untuk aksi pembacaan (getAllData, ping), gunakan GET terlebih dahulu (zero CORS preflight)
+      if (action === 'getAllData' || action === 'ping') {
+        try {
+          const sep = url.includes('?') ? '&' : '?';
+          const getUrl = `${url}${sep}action=${encodeURIComponent(action)}&t=${Date.now()}`;
+          const getRes = await fetch(getUrl);
+          if (getRes.ok) {
+            const rawText = await getRes.text();
+            if (rawText.trim().startsWith('<')) {
+              return { success: false, message: 'Akses Google Sheets dibatasi login. Pastikan deployment diatur ke "Who has access: Anyone" (Siapa saja).' };
+            }
+            const getData = JSON.parse(rawText);
+            if (getData && (getData.success || getData.status === 'ok')) {
+              return getData;
+            }
+          }
+        } catch (getErr) {
+          console.warn('[GSheet GET fallback to POST]:', getErr);
+        }
       }
 
       const bodyData = {
@@ -3612,7 +3654,12 @@
           throw new Error('HTTP ' + response.status + ' ' + response.statusText);
         }
 
-        const data = await response.json();
+        const rawText = await response.text();
+        if (rawText.trim().startsWith('<')) {
+          return { success: false, message: 'Akses Google Sheets dibatasi login. Pastikan deployment diatur ke "Who has access: Anyone" (Siapa saja).' };
+        }
+
+        const data = JSON.parse(rawText);
         return data;
       } catch (err) {
         console.warn('[GSheet API Error on action ' + action + ']:', err);
@@ -3660,10 +3707,14 @@
 
       const startTime = Date.now();
       try {
-        const pingUrl = url + (url.includes('?') ? '&' : '?') + 'action=ping';
+        const pingUrl = url + (url.includes('?') ? '&' : '?') + 'action=ping&t=' + Date.now();
         const res = await fetch(pingUrl);
         const duration = Date.now() - startTime;
-        const json = await res.json();
+        const text = await res.text();
+        if (text.trim().startsWith('<')) {
+          throw new Error('Akses dibatasi login Google. Pastikan deployment diatur ke: Who has access: Anyone (Siapa saja).');
+        }
+        const json = JSON.parse(text);
 
         if (json.success || json.status === 'ok') {
           if (alertBox) {
@@ -3677,33 +3728,89 @@
           throw new Error(json.message || 'Response invalid dari Google Sheets');
         }
       } catch (err) {
-        // Coba metode POST jika GET redirect terbatas
-        try {
-          const postRes = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ action: 'ping' })
-          });
-          const postJson = await postRes.json();
-          if (postJson.success || postJson.status === 'ok') {
-            if (alertBox) {
-              alertBox.style.background = '#f0fdf4';
-              alertBox.style.color = '#166534';
-              alertBox.style.border = '1px solid #bbf7d0';
-              alertBox.innerHTML = '<i class="fa-solid fa-circle-check"></i> <strong>Koneksi Berhasil (POST)!</strong> Google Sheets terhubung.';
-            }
-            showToast('Koneksi Google Sheets berhasil!', 'success');
-            return;
-          }
-        } catch (postErr) { }
-
         if (alertBox) {
           alertBox.style.background = '#fef2f2';
           alertBox.style.color = '#991b1b';
           alertBox.style.border = '1px solid #fecaca';
-          alertBox.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <strong>Gagal Terhubung:</strong> ' + err.message + '<br><small>Pastikan deployment Google Apps Script diatur ke: <em>Who has access: Anyone</em>.</small>';
+          alertBox.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <strong>Gagal Terhubung:</strong> ' + err.message + '<br><small>Pastikan deployment Google Apps Script diatur ke: <em>Execute as: Me</em> dan <em>Who has access: Anyone</em>.</small>';
         }
         showToast('Gagal terhubung ke Google Sheets: ' + err.message, 'error');
+      }
+    }
+
+    /**
+     * Mesin Sinkronisasi Lengkap Dua Arah
+     */
+    async function syncDatabaseNow(isManual = false) {
+      const url = getApiUrl();
+      if (!url) {
+        if (isManual) {
+          showToast('URL Google Sheets belum diatur. Silakan klik "Atur GSheets" untuk menghubungkan.', 'warning');
+          openApiConfigModal();
+        }
+        return false;
+      }
+
+      const syncBtn = document.getElementById('topbarSyncBtn');
+      if (syncBtn) {
+        syncBtn.classList.add('rotating');
+      }
+
+      if (isManual) showToast('Menyinkronkan data dengan Google Sheets...', 'info');
+
+      try {
+        let result = await callGSheetApi('getAllData');
+        if (!result || !result.success) {
+          await callGSheetApi('setupDatabase');
+          result = await callGSheetApi('getAllData');
+        }
+
+        if (result && result.success) {
+          const localData = getLocalData();
+          let kCount = 0, sCount = 0, jCount = 0;
+          if (result.kelas && Array.isArray(result.kelas)) { localData.kelas = result.kelas; kCount = result.kelas.length; }
+          if (result.siswa && Array.isArray(result.siswa)) { localData.siswa = result.siswa; sCount = result.siswa.length; }
+          if (result.nilai && Array.isArray(result.nilai)) localData.nilai = result.nilai;
+          if (result.jurnal && Array.isArray(result.jurnal)) { localData.jurnal = result.jurnal; jCount = result.jurnal.length; }
+          if (result.tahunAjaran && Array.isArray(result.tahunAjaran)) localData.tahunAjaran = result.tahunAjaran;
+
+          saveLocalData(localData);
+
+          if (result.kepsek) {
+            saveKepsekData(result.kepsek);
+          }
+          if (result.user) {
+            const activeUser = JSON.parse(localStorage.getItem('sipena_user') || '{}');
+            activeUser.nama = result.user.nama || activeUser.nama;
+            activeUser.role = result.user.role || activeUser.role;
+            localStorage.setItem('sipena_user', JSON.stringify(activeUser));
+            updateUserUI(activeUser);
+          }
+
+          const syncTimeStr = new Date().toLocaleString('id-ID');
+          localStorage.setItem(API_LAST_SYNC_KEY, syncTimeStr);
+          updateDbStatusUI();
+          refreshAllData();
+
+          if (isManual) {
+            showToast(`Sinkronisasi berhasil! ${kCount} Kelas, ${sCount} Siswa, ${jCount} Jurnal dimuat dari database.`, 'success');
+          }
+          return true;
+        } else {
+          if (isManual) {
+            showToast('Sinkronisasi gagal: ' + (result?.message || 'Server tidak merespons'), 'error');
+          }
+          return false;
+        }
+      } catch (err) {
+        if (isManual) {
+          showToast('Error sinkronisasi: ' + err.message, 'error');
+        }
+        return false;
+      } finally {
+        if (syncBtn) {
+          syncBtn.classList.remove('rotating');
+        }
       }
     }
 
@@ -3722,42 +3829,9 @@
       localStorage.setItem(API_URL_STORAGE_KEY, url);
       updateDbStatusUI();
 
-      showToast('Menghubungkan & menyinkronkan data Google Sheets...', 'info');
-
-      try {
-        let result = await callGSheetApi('getAllData');
-        if (!result.success) {
-          // Inisialisasi struktur sheet jika belum siap
-          await callGSheetApi('setupDatabase');
-          result = await callGSheetApi('getAllData');
-        }
-
-        if (result.success) {
-          const localData = getLocalData();
-          if (result.kelas && Array.isArray(result.kelas)) localData.kelas = result.kelas;
-          if (result.siswa && Array.isArray(result.siswa)) localData.siswa = result.siswa;
-          if (result.nilai && Array.isArray(result.nilai)) localData.nilai = result.nilai;
-          if (result.jurnal && Array.isArray(result.jurnal)) localData.jurnal = result.jurnal;
-          if (result.tahunAjaran && Array.isArray(result.tahunAjaran)) localData.tahunAjaran = result.tahunAjaran;
-
-          saveLocalData(localData);
-
-          if (result.kepsek) {
-            saveKepsekData(result.kepsek);
-          }
-
-          const syncTimeStr = new Date().toLocaleString('id-ID');
-          localStorage.setItem(API_LAST_SYNC_KEY, syncTimeStr);
-          updateDbStatusUI();
-
-          refreshAllData();
-          closeModal('modalApiConfig');
-          showToast('Sinkronisasi Google Sheets berhasil! Seluruh data diperbarui.', 'success');
-        } else {
-          showToast('Sinkronisasi gagal: ' + (result.message || 'Unknown error'), 'error');
-        }
-      } catch (err) {
-        showToast('Error sinkronisasi: ' + err.message, 'error');
+      const ok = await syncDatabaseNow(true);
+      if (ok) {
+        closeModal('modalApiConfig');
       }
     }
 
@@ -3790,24 +3864,17 @@
       initCharts();
       updateDbStatusUI();
 
-      // Silent background sync if GSheet API URL configured
+      // Sinkronisasi data saat halaman dimuat jika URL API sudah ada
       if (getApiUrl()) {
-        callGSheetApi('getAllData').then(res => {
-          if (res && res.success) {
-            const ld = getLocalData();
-            if (res.kelas && Array.isArray(res.kelas)) ld.kelas = res.kelas;
-            if (res.siswa && Array.isArray(res.siswa)) ld.siswa = res.siswa;
-            if (res.nilai && Array.isArray(res.nilai)) ld.nilai = res.nilai;
-            if (res.jurnal && Array.isArray(res.jurnal)) ld.jurnal = res.jurnal;
-            if (res.tahunAjaran && Array.isArray(res.tahunAjaran)) ld.tahunAjaran = res.tahunAjaran;
-            saveLocalData(ld);
-            if (res.kepsek) saveKepsekData(res.kepsek);
-            localStorage.setItem(API_LAST_SYNC_KEY, new Date().toLocaleString('id-ID'));
-            updateDbStatusUI();
-            refreshAllData();
-          }
-        }).catch(() => { });
+        syncDatabaseNow(false);
       }
+
+      // Auto-sync saat kembali ke tab browser (focus)
+      window.addEventListener('focus', () => {
+        if (getApiUrl()) {
+          syncDatabaseNow(false);
+        }
+      });
     });
 
     /* ==========================================================================
@@ -4130,11 +4197,19 @@
     function deleteKelasConfirm(id) {
       if (confirm('Yakin ingin menghapus kelas ini?')) {
         const data = getLocalData();
+        const target = (data.kelas || []).find(k => k.id === id);
+        const namaKelas = target ? target.namaKelas : '';
         data.kelas = data.kelas.filter(k => k.id !== id);
         saveLocalData(data);
         refreshAllData();
         showToast('Data Kelas berhasil dihapus.');
-        if (getApiUrl()) callGSheetApi('deleteKelas', { id: id });
+        if (getApiUrl()) {
+          callGSheetApi('deleteKelas', { id: id, namaKelas: namaKelas }).then(res => {
+            if (res && !res.success) {
+              showToast('Google Sheets: ' + (res.message || 'Gagal menghapus data kelas'), 'warning');
+            }
+          });
+        }
       }
     }
 
@@ -4225,15 +4300,22 @@
         const data = getLocalData();
         const targetSiswa = (data.siswa || []).find(s => s.id === id);
         const targetNisn = targetSiswa ? targetSiswa.nisn : null;
+        const targetNama = targetSiswa ? targetSiswa.namaSiswa : '';
 
         data.siswa = (data.siswa || []).filter(s => s.id !== id);
         if (targetNisn && data.nilai) {
-          data.nilai = data.nilai.filter(n => n.nisn !== targetNisn);
+          data.nilai = data.nilai.filter(n => String(n.nisn).trim() !== String(targetNisn).trim());
         }
         saveLocalData(data);
         refreshAllData();
         showToast('Data Siswa & Nilai terkait berhasil dihapus.');
-        if (getApiUrl()) callGSheetApi('deleteSiswa', { id: id });
+        if (getApiUrl()) {
+          callGSheetApi('deleteSiswa', { id: id, nisn: targetNisn, namaSiswa: targetNama }).then(res => {
+            if (res && !res.success) {
+              showToast('Google Sheets: ' + (res.message || 'Gagal menghapus data siswa'), 'warning');
+            }
+          });
+        }
       }
     }
 
@@ -4872,6 +4954,16 @@
       renderTahunAjaranTable();
       populateTahunAjaranSelects();
       showToast('Data Tahun Pelajaran berhasil disimpan!', 'success');
+
+      if (getApiUrl()) {
+        const payload = {
+          id: id || newId,
+          tahun: tahun,
+          semesterDefault: semester,
+          status: (isAktif || data.tahunAjaran.length === 0) ? 'Aktif' : 'Nonaktif'
+        };
+        callGSheetApi('saveTahunAjaran', payload);
+      }
     }
 
     function setTahunAjaranActive(id) {
@@ -4879,10 +4971,12 @@
       if (!data.tahunAjaran) return;
 
       let foundYear = '';
+      let targetObj = null;
       data.tahunAjaran.forEach(t => {
         if (t.id === id) {
           t.status = 'Aktif';
           foundYear = t.tahun;
+          targetObj = t;
         } else {
           t.status = 'Nonaktif';
         }
@@ -4892,6 +4986,10 @@
       renderTahunAjaranTable();
       populateTahunAjaranSelects();
       showToast('Tahun Pelajaran ' + foundYear + ' sekarang aktif sebagai acuan laporan.', 'success');
+
+      if (getApiUrl() && targetObj) {
+        callGSheetApi('saveTahunAjaran', targetObj);
+      }
     }
 
     function deleteTahunAjaran(id) {
@@ -4907,6 +5005,7 @@
       }
 
       if (confirm(`Apakah Anda yakin ingin menghapus Tahun Pelajaran "${item.tahun}"?`)) {
+        const tahunVal = item.tahun;
         data.tahunAjaran = data.tahunAjaran.filter(t => t.id !== id);
         if (data.tahunAjaran.length > 0 && !data.tahunAjaran.some(t => t.status === 'Aktif')) {
           data.tahunAjaran[0].status = 'Aktif';
@@ -4915,6 +5014,13 @@
         renderTahunAjaranTable();
         populateTahunAjaranSelects();
         showToast('Tahun Pelajaran berhasil dihapus.', 'success');
+        if (getApiUrl()) {
+          callGSheetApi('deleteTahunAjaran', { id: id, tahun: tahunVal }).then(res => {
+            if (res && !res.success) {
+              showToast('Google Sheets: ' + (res.message || 'Gagal menghapus tahun pelajaran'), 'warning');
+            }
+          });
+        }
       }
     }
 
@@ -4997,6 +5103,9 @@
         localStorage.setItem('sipena_user', JSON.stringify(activeUser));
         updateUserUI(activeUser);
         showToast('Data Profil Guru berhasil disimpan!');
+        if (getApiUrl()) {
+          callGSheetApi('updateProfile', { nama, nip, role, email });
+        }
       }
     }
 
@@ -5013,10 +5122,12 @@
       if (typeof google !== 'undefined' && google.script && google.script.run) {
         google.script.run.withSuccessHandler(res => {
           showToast('Data Kepala Sekolah & Instansi berhasil disimpan!');
-          if (getApiUrl()) callGSheetApi('updateKepsek', kepsekObj);
         }).updateKepsekData(kepsekObj);
       } else {
         showToast('Data Kepala Sekolah & Instansi berhasil disimpan!');
+      }
+      if (getApiUrl()) {
+        callGSheetApi('updateKepsek', kepsekObj);
       }
     }
 
@@ -5469,11 +5580,21 @@
     function deleteNilaiConfirm(idOrNisn) {
       if (confirm('Yakin ingin mereset data nilai siswa ini ke 0?')) {
         const data = getLocalData();
+        const targetNilai = (data.nilai || []).find(n => n.id === idOrNisn || String(n.nisn).trim() === String(idOrNisn).trim());
+        const id = targetNilai ? targetNilai.id : idOrNisn;
+        const nisn = targetNilai ? targetNilai.nisn : idOrNisn;
+
         data.nilai = (data.nilai || []).filter(n => n.id !== idOrNisn && String(n.nisn).trim() !== String(idOrNisn).trim());
         saveLocalData(data);
         refreshAllData();
         showToast('Data Nilai berhasil direset ke 0.');
-        if (getApiUrl()) callGSheetApi('deleteNilai', { id: idOrNisn });
+        if (getApiUrl()) {
+          callGSheetApi('deleteNilai', { id: id, nisn: nisn }).then(res => {
+            if (res && !res.success) {
+              showToast('Google Sheets: ' + (res.message || 'Gagal menghapus nilai'), 'warning');
+            }
+          });
+        }
       }
     }
 
@@ -5916,11 +6037,25 @@
     function deleteJurnalConfirm(id) {
       if (confirm('Yakin ingin menghapus data jurnal ini?')) {
         const data = getLocalData();
+        const target = (data.jurnal || []).find(j => j.id === id);
         data.jurnal = data.jurnal.filter(j => j.id !== id);
         saveLocalData(data);
         refreshAllData();
         showToast('Jurnal berhasil dihapus.');
-        if (getApiUrl()) callGSheetApi('deleteJurnal', { id: id });
+        if (getApiUrl()) {
+          const payload = {
+            id: id,
+            hariTanggal: target ? target.hariTanggal : '',
+            pertemuan: target ? target.pertemuan : '',
+            kelas: target ? target.kelas : '',
+            mapel: target ? target.mapel : ''
+          };
+          callGSheetApi('deleteJurnal', payload).then(res => {
+            if (res && !res.success) {
+              showToast('Google Sheets: ' + (res.message || 'Gagal menghapus jurnal'), 'warning');
+            }
+          });
+        }
       }
     }
 
